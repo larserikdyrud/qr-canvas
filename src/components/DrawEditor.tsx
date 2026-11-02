@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useReducer, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useReducer, useRef, useState } from "react";
 import {
   AlertTriangle,
   CheckCircle2,
   Copy,
+  Flame,
   Hand,
   Loader2,
   Redo2,
@@ -13,15 +14,19 @@ import {
   ZoomOut,
 } from "lucide-react";
 import type { Ecl, Matrix, QrSymbol } from "../lib/qr-draw";
+import type { Layout } from "../lib/qr-layout";
 import type { Verification } from "../lib/useVerification";
+import { heatFill } from "../lib/heat";
+import { MAX_STAMP_LENGTH, stampPixels } from "../lib/pixel-font";
 
-type Tool = "dark" | "light" | "toggle" | "restore" | "pan";
+type Tool = "dark" | "light" | "toggle" | "restore" | "stamp" | "pan";
 
 const TOOLS: { value: Tool; label: string; hint: string }[] = [
   { value: "dark", label: "Dark", hint: "Paint dark modules" },
   { value: "light", label: "Light", hint: "Paint light modules" },
   { value: "toggle", label: "Toggle", hint: "Flip the module you start on and paint with that colour" },
   { value: "restore", label: "Restore", hint: "Put the module back to what the code originally contained" },
+  { value: "stamp", label: "Stamp", hint: "Stamp text in a 3×5 pixel font" },
 ];
 
 const LOCKED_TINT = "rgba(122,116,106,0.32)";
@@ -31,6 +36,7 @@ const MAX_CELL = 48;
 
 type Props = {
   symbol: QrSymbol;
+  layout: Layout;
   matrix: Matrix;
   edits: ReadonlyMap<number, boolean>;
   fg: string;
@@ -51,6 +57,7 @@ type Props = {
 
 export function DrawEditor({
   symbol,
+  layout,
   matrix,
   edits,
   fg,
@@ -75,6 +82,12 @@ export function DrawEditor({
   const [focused, setFocused] = useState(false);
   const [copied, setCopied] = useState(false);
   const [width, setWidth] = useState(360);
+  const [heat, setHeat] = useState(false);
+  const [stampText, setStampText] = useState("HI");
+  const [stampScale, setStampScale] = useState(1);
+  const [stampDark, setStampDark] = useState(true);
+  const [hover, setHover] = useState<{ r: number; c: number } | null>(null);
+  const stampId = useId();
   const [, redraw] = useReducer((v: number) => v + 1, 0);
 
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -101,6 +114,22 @@ export function DrawEditor({
     return v === undefined ? symbol.original.get(r, c) : v;
   };
 
+  const stamp = stampPixels(stampText, stampScale);
+  const stampAt = (r: number, c: number) => {
+    if (stamp.pixels.length === 0) return;
+    const map = new Map(edits);
+    for (const [x, y] of stamp.pixels) {
+      const rr = r + y;
+      const cc = c + x;
+      if (rr < 0 || cc < 0 || rr >= n || cc >= n || symbol.isReserved(rr, cc)) continue;
+      const idx = rr * n + cc;
+      if (stampDark === symbol.original.get(rr, cc)) map.delete(idx);
+      else map.set(idx, stampDark);
+    }
+    const same = map.size === edits.size && [...map].every(([k, v]) => edits.get(k) === v);
+    if (!same) onCommit(map);
+  };
+
   useEffect(() => {
     const canvas = canvasRef.current;
     const ctx = canvas?.getContext("2d");
@@ -117,6 +146,11 @@ export function DrawEditor({
     const light = transparent ? "#ffffff" : bg;
     ctx.fillStyle = light;
     ctx.fillRect(0, 0, css, css);
+    const heatFills = heat
+      ? verification.budget.used.map((used, block) =>
+          heatFill(block, layout.tolerance > 0 ? used / layout.tolerance : used > 0 ? 2 : 0),
+        )
+      : null;
     for (let r = 0; r < n; r += 1) {
       for (let c = 0; c < n; c += 1) {
         const v = shown.get(r * n + c);
@@ -124,6 +158,14 @@ export function DrawEditor({
         if (dark) {
           ctx.fillStyle = fg;
           ctx.fillRect(c * cell, r * cell, cell, cell);
+        }
+        if (heatFills) {
+          const cw = layout.moduleCodeword[r * n + c];
+          if (cw >= 0) {
+            // a dot in the middle keeps the dark/light pattern readable underneath
+            ctx.fillStyle = heatFills[layout.codewordBlock[cw]];
+            ctx.fillRect(c * cell + cell * 0.25, r * cell + cell * 0.25, cell * 0.5, cell * 0.5);
+          }
         }
         if (symbol.isReserved(r, c)) {
           ctx.fillStyle = LOCKED_TINT;
@@ -150,6 +192,16 @@ export function DrawEditor({
       const r = Math.floor(key / n);
       const c = key % n;
       ctx.strokeRect(c * cell + inset, r * cell + inset, cell - inset * 2, cell - inset * 2);
+    }
+    const ghostAt = tool === "stamp" ? (hover ?? (focused ? cursor : null)) : null;
+    if (ghostAt) {
+      ctx.fillStyle = "rgba(29,78,216,0.5)";
+      for (const [x, y] of stamp.pixels) {
+        const rr = ghostAt.r + y;
+        const cc = ghostAt.c + x;
+        if (rr < 0 || cc < 0 || rr >= n || cc >= n || symbol.isReserved(rr, cc)) continue;
+        ctx.fillRect(cc * cell, rr * cell, cell, cell);
+      }
     }
     if (logoSpan) {
       ctx.setLineDash([6, 4]);
@@ -221,6 +273,11 @@ export function DrawEditor({
 
   const onPointerDown = (event: React.PointerEvent<HTMLCanvasElement>) => {
     if (tool === "pan" || event.button > 0) return;
+    if (tool === "stamp") {
+      const at = cellFromEvent(event);
+      stampAt(at.r, at.c);
+      return;
+    }
     event.currentTarget.setPointerCapture(event.pointerId);
     const { r, c } = cellFromEvent(event);
     working.current = new Map(edits);
@@ -229,6 +286,11 @@ export function DrawEditor({
   };
 
   const onPointerMove = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    if (tool === "stamp") {
+      const at = cellFromEvent(event);
+      setHover((h) => (h && h.r === at.r && h.c === at.c ? h : at));
+      return;
+    }
     if (!working.current) return;
     const { r, c } = cellFromEvent(event);
     strokeTo(r, c);
@@ -258,6 +320,10 @@ export function DrawEditor({
     else if (event.key === "ArrowRight") move(0, 1);
     else if ((event.key === " " || event.key === "Enter") && tool !== "pan") {
       event.preventDefault();
+      if (tool === "stamp") {
+        stampAt(cursor.r, cursor.c);
+        return;
+      }
       working.current = new Map(edits);
       strokeValue.current = !current(cursor.r, cursor.c);
       paint(cursor.r, cursor.c);
@@ -359,6 +425,69 @@ export function DrawEditor({
         </button>
       </div>
 
+      {tool === "stamp" ? (
+        <div className="flex flex-wrap items-end gap-x-4 gap-y-3 rounded-[var(--radius-md)] border border-line bg-field p-3">
+          <div className="space-y-1">
+            <label htmlFor={stampId} className="block text-sm font-medium text-ink">
+              Stamp text
+            </label>
+            <input
+              id={stampId}
+              type="text"
+              value={stampText}
+              maxLength={MAX_STAMP_LENGTH}
+              onChange={(event) => setStampText(event.target.value)}
+              spellCheck={false}
+              autoComplete="off"
+              className="min-h-11 w-44 rounded-[var(--radius-md)] border border-line bg-bg-raised px-3 font-mono text-sm uppercase text-ink outline-none focus:border-line-strong focus:ring-2 focus:ring-accent/25"
+            />
+          </div>
+          <div role="group" aria-label="Stamp colour" className="flex gap-1">
+            {[
+              { label: "Dark text", dark: true },
+              { label: "Light text", dark: false },
+            ].map((o) => (
+              <button
+                key={o.label}
+                type="button"
+                aria-pressed={stampDark === o.dark}
+                onClick={() => setStampDark(o.dark)}
+                className={`min-h-11 rounded-[var(--radius-md)] border px-3 text-sm font-medium ${
+                  stampDark === o.dark
+                    ? "border-accent bg-accent text-accent-fg"
+                    : "border-line bg-bg-raised text-ink hover:border-line-strong"
+                }`}
+              >
+                {o.label}
+              </button>
+            ))}
+          </div>
+          <div role="group" aria-label="Stamp size" className="flex gap-1">
+            {[1, 2].map((s) => (
+              <button
+                key={s}
+                type="button"
+                aria-pressed={stampScale === s}
+                aria-label={`Stamp size ${s}×`}
+                onClick={() => setStampScale(s)}
+                className={`min-h-11 min-w-11 rounded-[var(--radius-md)] border px-3 text-sm font-medium ${
+                  stampScale === s
+                    ? "border-accent bg-accent text-accent-fg"
+                    : "border-line bg-bg-raised text-ink hover:border-line-strong"
+                }`}
+              >
+                {s}×
+              </button>
+            ))}
+          </div>
+          <p className="basis-full text-xs text-muted">
+            {stamp.pixels.length > 0
+              ? `Stamp is ${stamp.width}×${stamp.height} modules. Click the grid to place its top-left corner; blue shows where it lands.`
+              : "Type something to stamp."}
+          </p>
+        </div>
+      ) : null}
+
       <div className="flex flex-wrap items-center gap-2">
         <button
           type="button"
@@ -388,6 +517,18 @@ export function DrawEditor({
         >
           <Trash2 className="size-4" aria-hidden="true" />
           Clear drawing
+        </button>
+        <button
+          type="button"
+          aria-pressed={heat}
+          onClick={() => setHeat((h) => !h)}
+          title="Tint each module by its Reed–Solomon block and how much of that block's repair budget is used"
+          className={`inline-flex min-h-11 items-center gap-1.5 rounded-[var(--radius-md)] border px-3 text-sm font-medium transition-colors ${
+            heat ? "border-accent bg-accent text-accent-fg" : "border-line bg-field text-ink hover:border-line-strong"
+          }`}
+        >
+          <Flame className="size-4" aria-hidden="true" />
+          Heatmap
         </button>
         <div className="ml-auto flex items-center gap-1" role="group" aria-label="Zoom">
           <button
@@ -425,6 +566,7 @@ export function DrawEditor({
           onPointerMove={onPointerMove}
           onPointerUp={endStroke}
           onPointerCancel={endStroke}
+          onPointerLeave={() => setHover(null)}
           onFocus={() => setFocused(true)}
           onBlur={() => setFocused(false)}
           style={{ touchAction: tool === "pan" ? "auto" : "none", cursor: tool === "pan" ? "grab" : "crosshair" }}
@@ -434,6 +576,12 @@ export function DrawEditor({
       <p className="text-xs text-muted">
         Orange outline = changed module. Dashed square = area the logo covers. Drag to paint several modules.
       </p>
+      {heat ? (
+        <p className="text-xs text-muted">
+          Heatmap: each coloured dot belongs to a Reed–Solomon block, and the code repairs every block on its own. A
+          stronger dot means more of that block&apos;s repair budget is used. Red means over budget.
+        </p>
+      ) : null}
 
       <div className={`space-y-3 rounded-[var(--radius-lg)] border p-4 ${panelTone}`}>
         <div role="status" aria-live="polite" className="flex items-start gap-3">

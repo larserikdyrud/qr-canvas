@@ -15,6 +15,15 @@ async function open(page: Page) {
   return errors;
 }
 
+/** Centre the drawing grid in the viewport and return a cell-to-page-coordinates function. */
+async function measureGrid(page: Page, n: number) {
+  const grid = page.getByRole("region", { name: "Draw in the code" }).getByRole("application");
+  await grid.evaluate((el) => el.scrollIntoView({ block: "center" }));
+  const box = (await grid.boundingBox())!;
+  const cell = box.width / n;
+  return (r: number, c: number) => ({ x: box.x + (c + 0.5) * cell, y: box.y + (r + 0.5) * cell });
+}
+
 async function canvasHasInk(page: Page) {
   return page.locator('canvas[role="img"]').evaluate((c: HTMLCanvasElement) => {
     const d = c.getContext("2d")!.getImageData(0, 0, c.width, c.height).data;
@@ -71,13 +80,9 @@ test("drawing mode: small edit still reads, heavy damage is flagged", async ({ p
 
   const header = await editor.getByText(/Version \d+ · \d+×\d+ modules/).innerText();
   const n = Number(/(\d+)×\d+ modules/.exec(header)![1]);
-  const grid = editor.getByRole("application");
-  const box = (await grid.boundingBox())!;
-  const cell = box.width / n;
-  const at = (r: number, c: number) => ({ x: box.x + (c + 0.5) * cell, y: box.y + (r + 0.5) * cell });
-
   // one cell in the data area flips (toggle tool, so it changes whatever it was) and is counted
   await editor.getByRole("button", { name: "Toggle" }).click();
+  let at = await measureGrid(page, n);
   const p = at(n - 3, n - 3);
   await page.mouse.click(p.x, p.y);
   await expect(editor.getByText(/1 changed/)).toBeVisible();
@@ -93,7 +98,8 @@ test("drawing mode: small edit still reads, heavy damage is flagged", async ({ p
   await expect(page.getByLabel("Text or URL")).toHaveAttribute("readonly", "");
 
   // erase most of the data area: far beyond what error correction can repair
-  await editor.getByRole("button", { name: "Light" }).click();
+  await editor.getByRole("button", { name: "Light", exact: true }).click();
+  at = await measureGrid(page, n);
   const start = at(9, 0);
   await page.mouse.move(start.x, start.y);
   await page.mouse.down();
@@ -110,5 +116,34 @@ test("drawing mode: small edit still reads, heavy damage is flagged", async ({ p
   await expect(editor.getByText(/0 changed/)).toBeVisible();
   await expect(editor.getByRole("status").first()).toContainText("Readable");
 
+  expect(errors).toEqual([]);
+});
+
+test("stamp text onto the grid and show the heatmap", async ({ page }) => {
+  const errors = await open(page);
+  await page.getByLabel("Text or URL").fill(TEXT);
+  await page.getByRole("button", { name: "Draw in the code" }).click();
+  await page.getByRole("button", { name: "Switch to H" }).click();
+  const editor = page.getByRole("region", { name: "Draw in the code" });
+
+  const heat = editor.getByRole("button", { name: "Heatmap" });
+  await heat.click();
+  await expect(heat).toHaveAttribute("aria-pressed", "true");
+  await expect(editor.getByText(/each coloured dot belongs to a Reed–Solomon block/)).toBeVisible();
+
+  await editor.getByRole("button", { name: "Stamp", exact: true }).click();
+  await expect(editor.getByLabel("Stamp text")).toHaveValue("HI");
+  await expect(editor.getByText(/Stamp is 7×5 modules/)).toBeVisible();
+
+  const header = await editor.getByText(/Version \d+ · \d+×\d+ modules/).innerText();
+  const n = Number(/(\d+)×\d+ modules/.exec(header)![1]);
+  const at = await measureGrid(page, n);
+  const target = at(10, 10);
+  await page.mouse.click(target.x, target.y);
+  await expect(editor.getByText(/modules · [1-9]\d* changed/)).toBeVisible();
+  await expect(editor.getByRole("status").first()).toContainText("Readable");
+
+  await page.keyboard.press("Control+z");
+  await expect(editor.getByText(/modules · 0 changed/)).toBeVisible();
   expect(errors).toEqual([]);
 });
