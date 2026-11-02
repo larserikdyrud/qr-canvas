@@ -119,17 +119,12 @@ test("drawing mode: small edit still reads, heavy damage is flagged", async ({ p
   expect(errors).toEqual([]);
 });
 
-test("stamp text onto the grid and show the heatmap", async ({ page }) => {
+test("stamp text onto the grid", async ({ page }) => {
   const errors = await open(page);
   await page.getByLabel("Text or URL").fill(TEXT);
   await page.getByRole("button", { name: "Draw in the code" }).click();
   await page.getByRole("button", { name: "Switch to H" }).click();
   const editor = page.getByRole("region", { name: "Draw in the code" });
-
-  const heat = editor.getByRole("button", { name: "Heatmap" });
-  await heat.click();
-  await expect(heat).toHaveAttribute("aria-pressed", "true");
-  await expect(editor.getByText(/each coloured dot belongs to a Reed–Solomon block/)).toBeVisible();
 
   await editor.getByRole("button", { name: "Stamp", exact: true }).click();
   await expect(editor.getByLabel("Stamp text")).toHaveValue("HI");
@@ -145,5 +140,39 @@ test("stamp text onto the grid and show the heatmap", async ({ page }) => {
 
   await page.keyboard.press("Control+z");
   await expect(editor.getByText(/modules · 0 changed/)).toBeVisible();
+  expect(errors).toEqual([]);
+});
+
+const SMILEY_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200" viewBox="0 0 200 200">
+<rect width="200" height="200" fill="#fff"/><circle cx="100" cy="100" r="80" fill="none" stroke="#000" stroke-width="16"/>
+<circle cx="70" cy="80" r="12" fill="#000"/><circle cx="130" cy="80" r="12" fill="#000"/>
+<path d="M55 120 Q100 170 145 120" fill="none" stroke="#000" stroke-width="14" stroke-linecap="round"/></svg>`;
+
+test("stencil an image onto the grid", async ({ page }) => {
+  const errors = await open(page);
+  await page.getByLabel("Text or URL").fill(TEXT);
+  await page.getByRole("button", { name: "Draw in the code" }).click();
+  await page.getByRole("button", { name: "Switch to H" }).click();
+  const editor = page.getByRole("region", { name: "Draw in the code" });
+
+  await editor.getByRole("button", { name: "Image", exact: true }).click();
+  await editor.getByLabel("Image file").setInputFiles({
+    name: "smiley.svg",
+    mimeType: "image/svg+xml",
+    buffer: Buffer.from(SMILEY_SVG),
+  });
+  await expect(editor.getByText(/smiley\.svg becomes \d+×\d+ modules/)).toBeVisible();
+
+  await editor.getByLabel("Width").fill("9");
+  await expect(editor.getByText(/smiley\.svg becomes 9×9 modules/)).toBeVisible();
+  await editor.getByRole("button", { name: "Place in centre" }).click();
+  await expect(editor.getByText(/modules · [1-9]\d* changed/)).toBeVisible();
+  await expect(editor.getByRole("status").first()).toContainText(/Readable|little margin/, { timeout: 5000 });
+
+  await page.keyboard.press("Control+z");
+  await expect(editor.getByText(/modules · 0 changed/)).toBeVisible();
+
+  await editor.getByLabel("Image file").setInputFiles({ name: "notes.txt", mimeType: "text/plain", buffer: Buffer.from("hello") });
+  await expect(editor.getByRole("alert")).toContainText("could not be read as an image");
   expect(errors).toEqual([]);
 });

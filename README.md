@@ -2,6 +2,10 @@
 
 QR codes you can draw on. Style the code, paint pixel art in its own module grid, and check live that the original text still decodes. Everything runs in the browser; nothing is uploaded.
 
+## Drawing tools
+
+Dark, Light, Toggle and Restore paint single modules. **Stamp** places short text in a 3×5 pixel font. **Image** turns a picture into black and white at a width you choose (threshold and invert included) and stamps it onto the grid. Each stamp is one undo step, and the live check runs after every change.
+
 ## Develop
 
 Needs Node 20.19+ or 22.12+.

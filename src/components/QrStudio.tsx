@@ -145,7 +145,6 @@ function DrawSection({
     <div ref={sectionRef}>
       <DrawEditor
         symbol={symbol}
-        layout={layout}
         matrix={matrix}
         edits={edits}
         fg={settings.fg}

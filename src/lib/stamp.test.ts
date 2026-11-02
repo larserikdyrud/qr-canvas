@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import { stampPixels } from "./pixel-font";
-import { heatFill, OVER_BUDGET } from "./heat";
 
 describe("pixel font", () => {
   it("lays out glyphs with a one-module gap", () => {
@@ -23,18 +22,5 @@ describe("pixel font", () => {
 
   it("returns nothing for empty text", () => {
     expect(stampPixels("")).toEqual({ width: 0, height: 0, pixels: [] });
-  });
-});
-
-describe("heatmap colours", () => {
-  it("gets stronger with load and turns red over budget", () => {
-    const alpha = (css: string) => Number(/,\s*([\d.]+)\)$/.exec(css)![1]);
-    expect(alpha(heatFill(2, 0))).toBeLessThan(alpha(heatFill(2, 0.5)));
-    expect(alpha(heatFill(2, 0.5))).toBeLessThan(alpha(heatFill(2, 1)));
-    expect(heatFill(2, 1.01)).toBe(OVER_BUDGET);
-  });
-
-  it("gives neighbouring blocks different hues", () => {
-    expect(heatFill(0, 0.5)).not.toBe(heatFill(1, 0.5));
   });
 });

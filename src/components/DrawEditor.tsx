@@ -1,9 +1,8 @@
-import { useCallback, useEffect, useId, useReducer, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useReducer, useRef, useState } from "react";
 import {
   AlertTriangle,
   CheckCircle2,
   Copy,
-  Flame,
   Hand,
   Loader2,
   Redo2,
@@ -14,12 +13,15 @@ import {
   ZoomOut,
 } from "lucide-react";
 import type { Ecl, Matrix, QrSymbol } from "../lib/qr-draw";
-import type { Layout } from "../lib/qr-layout";
 import type { Verification } from "../lib/useVerification";
-import { heatFill } from "../lib/heat";
 import { MAX_STAMP_LENGTH, stampPixels } from "../lib/pixel-font";
+import { autoThreshold, loadSource, makeStencil, maxStencilWidth, type Source } from "../lib/stencil";
+import { SliderField } from "./controls";
 
-type Tool = "dark" | "light" | "toggle" | "restore" | "stamp" | "pan";
+type Tool = "dark" | "light" | "toggle" | "restore" | "stamp" | "stencil" | "pan";
+
+/** Modules a placement tool would set: offsets from the top-left corner and the colour to set. */
+type Patch = { width: number; height: number; cells: { x: number; y: number; dark: boolean }[] };
 
 const TOOLS: { value: Tool; label: string; hint: string }[] = [
   { value: "dark", label: "Dark", hint: "Paint dark modules" },
@@ -27,6 +29,7 @@ const TOOLS: { value: Tool; label: string; hint: string }[] = [
   { value: "toggle", label: "Toggle", hint: "Flip the module you start on and paint with that colour" },
   { value: "restore", label: "Restore", hint: "Put the module back to what the code originally contained" },
   { value: "stamp", label: "Stamp", hint: "Stamp text in a 3×5 pixel font" },
+  { value: "stencil", label: "Image", hint: "Turn an image into black-and-white modules and stamp it on the grid" },
 ];
 
 const LOCKED_TINT = "rgba(122,116,106,0.32)";
@@ -36,7 +39,6 @@ const MAX_CELL = 48;
 
 type Props = {
   symbol: QrSymbol;
-  layout: Layout;
   matrix: Matrix;
   edits: ReadonlyMap<number, boolean>;
   fg: string;
@@ -57,7 +59,6 @@ type Props = {
 
 export function DrawEditor({
   symbol,
-  layout,
   matrix,
   edits,
   fg,
@@ -82,12 +83,18 @@ export function DrawEditor({
   const [focused, setFocused] = useState(false);
   const [copied, setCopied] = useState(false);
   const [width, setWidth] = useState(360);
-  const [heat, setHeat] = useState(false);
   const [stampText, setStampText] = useState("HI");
   const [stampScale, setStampScale] = useState(1);
   const [stampDark, setStampDark] = useState(true);
   const [hover, setHover] = useState<{ r: number; c: number } | null>(null);
+  const [source, setSource] = useState<Source | null>(null);
+  const [sourceName, setSourceName] = useState("");
+  const [stencilWidth, setStencilWidth] = useState(0);
+  const [threshold, setThreshold] = useState(128);
+  const [invert, setInvert] = useState(false);
+  const [imageError, setImageError] = useState("");
   const stampId = useId();
+  const imageId = useId();
   const [, redraw] = useReducer((v: number) => v + 1, 0);
 
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -115,20 +122,55 @@ export function DrawEditor({
   };
 
   const stamp = stampPixels(stampText, stampScale);
-  const stampAt = (r: number, c: number) => {
-    if (stamp.pixels.length === 0) return;
+  const stencil = useMemo(
+    () => (source && stencilWidth > 0 ? makeStencil(source, stencilWidth, threshold, invert) : null),
+    [source, stencilWidth, threshold, invert],
+  );
+  const patch: Patch | null =
+    tool === "stamp"
+      ? {
+          width: stamp.width,
+          height: stamp.height,
+          cells: stamp.pixels.map(([x, y]) => ({ x, y, dark: stampDark })),
+        }
+      : tool === "stencil" && stencil
+        ? {
+            width: stencil.width,
+            height: stencil.height,
+            cells: stencil.dark.map((dark, i) => ({ x: i % stencil.width, y: Math.floor(i / stencil.width), dark })),
+          }
+        : null;
+  const placing = tool === "stamp" || tool === "stencil";
+
+  const placeAt = (r: number, c: number) => {
+    if (!patch || patch.cells.length === 0) return;
     const map = new Map(edits);
-    for (const [x, y] of stamp.pixels) {
+    for (const { x, y, dark } of patch.cells) {
       const rr = r + y;
       const cc = c + x;
       if (rr < 0 || cc < 0 || rr >= n || cc >= n || symbol.isReserved(rr, cc)) continue;
       const idx = rr * n + cc;
-      if (stampDark === symbol.original.get(rr, cc)) map.delete(idx);
-      else map.set(idx, stampDark);
+      if (dark === symbol.original.get(rr, cc)) map.delete(idx);
+      else map.set(idx, dark);
     }
     const same = map.size === edits.size && [...map].every(([k, v]) => edits.get(k) === v);
     if (!same) onCommit(map);
   };
+
+  async function chooseImage(file: File | undefined) {
+    if (!file) return;
+    setImageError("");
+    try {
+      const next = await loadSource(file);
+      setSource(next);
+      setSourceName(file.name);
+      setStencilWidth(Math.min(maxStencilWidth(next, n), Math.max(5, Math.round(n / 2))));
+      setThreshold(autoThreshold(next.lum));
+      setInvert(false);
+    } catch {
+      setImageError("That file could not be read as an image. Try a PNG, JPEG, GIF, WebP or SVG.");
+    }
+  }
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -146,11 +188,6 @@ export function DrawEditor({
     const light = transparent ? "#ffffff" : bg;
     ctx.fillStyle = light;
     ctx.fillRect(0, 0, css, css);
-    const heatFills = heat
-      ? verification.budget.used.map((used, block) =>
-          heatFill(block, layout.tolerance > 0 ? used / layout.tolerance : used > 0 ? 2 : 0),
-        )
-      : null;
     for (let r = 0; r < n; r += 1) {
       for (let c = 0; c < n; c += 1) {
         const v = shown.get(r * n + c);
@@ -158,14 +195,6 @@ export function DrawEditor({
         if (dark) {
           ctx.fillStyle = fg;
           ctx.fillRect(c * cell, r * cell, cell, cell);
-        }
-        if (heatFills) {
-          const cw = layout.moduleCodeword[r * n + c];
-          if (cw >= 0) {
-            // a dot in the middle keeps the dark/light pattern readable underneath
-            ctx.fillStyle = heatFills[layout.codewordBlock[cw]];
-            ctx.fillRect(c * cell + cell * 0.25, r * cell + cell * 0.25, cell * 0.5, cell * 0.5);
-          }
         }
         if (symbol.isReserved(r, c)) {
           ctx.fillStyle = LOCKED_TINT;
@@ -193,15 +222,20 @@ export function DrawEditor({
       const c = key % n;
       ctx.strokeRect(c * cell + inset, r * cell + inset, cell - inset * 2, cell - inset * 2);
     }
-    const ghostAt = tool === "stamp" ? (hover ?? (focused ? cursor : null)) : null;
-    if (ghostAt) {
-      ctx.fillStyle = "rgba(29,78,216,0.5)";
-      for (const [x, y] of stamp.pixels) {
+    const ghostAt = placing && patch ? (hover ?? (focused ? cursor : null)) : null;
+    if (ghostAt && patch) {
+      for (const { x, y, dark } of patch.cells) {
         const rr = ghostAt.r + y;
         const cc = ghostAt.c + x;
         if (rr < 0 || cc < 0 || rr >= n || cc >= n || symbol.isReserved(rr, cc)) continue;
+        ctx.fillStyle = dark ? "#1d4ed8" : "#dbe6ff";
         ctx.fillRect(cc * cell, rr * cell, cell, cell);
       }
+      ctx.strokeStyle = CURSOR_COLOR;
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([4, 3]);
+      ctx.strokeRect(ghostAt.c * cell, ghostAt.r * cell, patch.width * cell, patch.height * cell);
+      ctx.setLineDash([]);
     }
     if (logoSpan) {
       ctx.setLineDash([6, 4]);
@@ -273,9 +307,9 @@ export function DrawEditor({
 
   const onPointerDown = (event: React.PointerEvent<HTMLCanvasElement>) => {
     if (tool === "pan" || event.button > 0) return;
-    if (tool === "stamp") {
+    if (placing) {
       const at = cellFromEvent(event);
-      stampAt(at.r, at.c);
+      placeAt(at.r, at.c);
       return;
     }
     event.currentTarget.setPointerCapture(event.pointerId);
@@ -286,7 +320,7 @@ export function DrawEditor({
   };
 
   const onPointerMove = (event: React.PointerEvent<HTMLCanvasElement>) => {
-    if (tool === "stamp") {
+    if (placing) {
       const at = cellFromEvent(event);
       setHover((h) => (h && h.r === at.r && h.c === at.c ? h : at));
       return;
@@ -320,8 +354,8 @@ export function DrawEditor({
     else if (event.key === "ArrowRight") move(0, 1);
     else if ((event.key === " " || event.key === "Enter") && tool !== "pan") {
       event.preventDefault();
-      if (tool === "stamp") {
-        stampAt(cursor.r, cursor.c);
+      if (placing) {
+        placeAt(cursor.r, cursor.c);
         return;
       }
       working.current = new Map(edits);
@@ -488,6 +522,82 @@ export function DrawEditor({
         </div>
       ) : null}
 
+      {tool === "stencil" ? (
+        <div className="space-y-3 rounded-[var(--radius-md)] border border-line bg-field p-3">
+          <div className="space-y-1">
+            <label htmlFor={imageId} className="block text-sm font-medium text-ink">
+              Image file
+            </label>
+            <input
+              id={imageId}
+              type="file"
+              accept="image/*"
+              onChange={(event) => {
+                void chooseImage(event.target.files?.[0]);
+                event.target.value = "";
+              }}
+              className="block w-full text-sm text-ink-soft file:mr-3 file:min-h-11 file:cursor-pointer file:rounded-[var(--radius-md)] file:border file:border-line file:bg-bg-raised file:px-3 file:text-sm file:font-medium file:text-ink hover:file:border-line-strong"
+            />
+          </div>
+          {imageError ? (
+            <p role="alert" className="text-sm text-danger">
+              {imageError}
+            </p>
+          ) : null}
+          {source && stencil ? (
+            <>
+              <div className="grid gap-x-6 gap-y-1 sm:grid-cols-2">
+                <SliderField
+                  label="Width"
+                  valueLabel={`${stencil.width} modules`}
+                  min={Math.min(5, maxStencilWidth(source, n))}
+                  max={maxStencilWidth(source, n)}
+                  step={1}
+                  value={stencilWidth}
+                  onChange={setStencilWidth}
+                />
+                <SliderField
+                  label="Threshold"
+                  valueLabel={String(threshold)}
+                  min={1}
+                  max={255}
+                  step={1}
+                  value={threshold}
+                  onChange={setThreshold}
+                />
+              </div>
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+                <label className="inline-flex min-h-11 items-center gap-2 text-sm text-ink">
+                  <input
+                    type="checkbox"
+                    checked={invert}
+                    onChange={(event) => setInvert(event.target.checked)}
+                    className="size-4 accent-accent"
+                  />
+                  Invert
+                </label>
+                <button
+                  type="button"
+                  onClick={() => placeAt(Math.floor((n - stencil.height) / 2), Math.floor((n - stencil.width) / 2))}
+                  className="min-h-11 rounded-[var(--radius-md)] border border-line-strong bg-bg-raised px-3 text-sm font-medium text-ink hover:border-ink"
+                >
+                  Place in centre
+                </button>
+              </div>
+              <p className="text-xs text-muted">
+                {sourceName} becomes {stencil.width}×{stencil.height} modules. Click the grid to place its top-left
+                corner; blue modules will turn dark and pale ones light. Every changed module spends error-correction budget, so smaller and simpler images are safer.
+              </p>
+            </>
+          ) : (
+            <p className="text-xs text-muted">
+              Choose a picture, logo or drawing. It is shrunk to modules and cut into black and white, entirely in your
+              browser.
+            </p>
+          )}
+        </div>
+      ) : null}
+
       <div className="flex flex-wrap items-center gap-2">
         <button
           type="button"
@@ -517,18 +627,6 @@ export function DrawEditor({
         >
           <Trash2 className="size-4" aria-hidden="true" />
           Clear drawing
-        </button>
-        <button
-          type="button"
-          aria-pressed={heat}
-          onClick={() => setHeat((h) => !h)}
-          title="Tint each module by its Reed–Solomon block and how much of that block's repair budget is used"
-          className={`inline-flex min-h-11 items-center gap-1.5 rounded-[var(--radius-md)] border px-3 text-sm font-medium transition-colors ${
-            heat ? "border-accent bg-accent text-accent-fg" : "border-line bg-field text-ink hover:border-line-strong"
-          }`}
-        >
-          <Flame className="size-4" aria-hidden="true" />
-          Heatmap
         </button>
         <div className="ml-auto flex items-center gap-1" role="group" aria-label="Zoom">
           <button
@@ -576,12 +674,6 @@ export function DrawEditor({
       <p className="text-xs text-muted">
         Orange outline = changed module. Dashed square = area the logo covers. Drag to paint several modules.
       </p>
-      {heat ? (
-        <p className="text-xs text-muted">
-          Heatmap: each coloured dot belongs to a Reed–Solomon block, and the code repairs every block on its own. A
-          stronger dot means more of that block&apos;s repair budget is used. Red means over budget.
-        </p>
-      ) : null}
 
       <div className={`space-y-3 rounded-[var(--radius-lg)] border p-4 ${panelTone}`}>
         <div role="status" aria-live="polite" className="flex items-start gap-3">
