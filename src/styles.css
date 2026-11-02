@@ -1,0 +1,72 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Source Serif 4", "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+  --font-display: "Source Serif 4", "Iowan Old Style", Palatino, Georgia, serif;
+  --font-mono: "IBM Plex Mono", "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+
+  --color-bg: #f3eee6;
+  --color-bg-raised: #faf7f2;
+  --color-ink: #1c1915;
+  --color-ink-soft: #4a453d;
+  --color-muted: #7a746a;
+  --color-line: #d6cfc3;
+  --color-line-strong: #b8b0a3;
+  --color-accent: #2c4a3e;
+  --color-accent-fg: #f3eee6;
+  --color-danger: #8b3a2a;
+  --color-field: #fffdf9;
+  --color-preview: #ece6dc;
+
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 20px;
+  --radius-xl: 28px;
+
+  --shadow-panel: 0 1px 0 color-mix(in oklab, var(--color-ink) 6%, transparent),
+    0 18px 40px -24px color-mix(in oklab, var(--color-ink) 35%, transparent);
+}
+
+@layer base {
+  button:not(:disabled),
+  [role="button"]:not(:disabled) {
+    cursor: pointer;
+  }
+
+  html,
+  body,
+  #root {
+    min-height: 100%;
+  }
+
+  body {
+    background: var(--color-bg);
+    color: var(--color-ink);
+    font-family: var(--font-sans);
+    line-height: 1.5;
+  }
+
+  ::selection {
+    background: color-mix(in oklab, var(--color-accent) 22%, transparent);
+    color: var(--color-ink);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+.checker {
+  background-color: var(--color-preview);
+  background-image:
+    linear-gradient(45deg, color-mix(in oklab, var(--color-ink) 8%, transparent) 25%, transparent 25%, transparent 75%, color-mix(in oklab, var(--color-ink) 8%, transparent) 75%),
+    linear-gradient(45deg, color-mix(in oklab, var(--color-ink) 8%, transparent) 25%, transparent 25%, transparent 75%, color-mix(in oklab, var(--color-ink) 8%, transparent) 75%);
+  background-position: 0 0, 10px 10px;
+  background-size: 20px 20px;
+}
